@@ -3,6 +3,8 @@ from pyrogram import Client, filters
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 import logging
 from pathlib import Path
+import subprocess
+import time
 from download_manager import DownloadManager
 from upload_manager import UploadManager
 from progress_tracker import ProgressTracker
@@ -23,6 +25,9 @@ class TelegramBot:
             bot_token="702E"
         )
         
+        # Start aria2c
+        self._start_aria2()
+        
         # Initialize managers
         self.download_manager = DownloadManager()
         self.upload_manager = UploadManager()
@@ -30,6 +35,30 @@ class TelegramBot:
         
         # Setup handlers
         self._setup_handlers()
+    
+    def _start_aria2(self):
+        """Start aria2c RPC server"""
+        try:
+            # Kill any existing aria2c processes
+            subprocess.run(['pkill', 'aria2c'], stderr=subprocess.DEVNULL)
+            
+            # Start new aria2c process
+            self.aria_process = subprocess.Popen([
+                "aria2c",
+                "--enable-rpc",
+                "--rpc-listen-all=true",
+                "--rpc-allow-origin-all",
+                "--rpc-listen-port=6800",
+                "--disable-ipv6"
+            ])
+            
+            # Give aria2c time to start
+            time.sleep(2)
+            logging.info("aria2c started successfully")
+            
+        except Exception as e:
+            logging.error(f"Failed to start aria2c: {str(e)}")
+            raise
         
     def _setup_handlers(self):
         @self.app.on_message(filters.command("start"))
@@ -52,11 +81,20 @@ class TelegramBot:
             await self.upload_manager.cancel_upload(callback_query)
 
     def run(self):
-        self.app.run()
+        try:
+            logging.info("Bot starting...")
+            self.app.run()
+        finally:
+            # Cleanup aria2c on exit
+            if hasattr(self, 'aria_process'):
+                self.aria_process.terminate()
+                self.aria_process.wait()
+                logging.info("aria2c terminated")
 
 if __name__ == "__main__":
     bot = TelegramBot()
     bot.run()
+
 
 # download_manager.py
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
