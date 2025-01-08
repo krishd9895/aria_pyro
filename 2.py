@@ -1,4 +1,3 @@
-
 from pyrogram import Client, filters
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 from pyrogram.errors import MessageNotModified
@@ -31,9 +30,9 @@ RCLONE_CONFIGS_DIR.mkdir(exist_ok=True)
 
 app = Client(
     "my_bot",
-    api_id="27",
-    api_hash="916",
-    bot_token="702E"
+    api_id="2",
+    api_hash="905",
+    bot_token="7A-E"
 )
 
 aria2 = ariaClient(
@@ -136,6 +135,84 @@ async def handle_document(client, message):
     except Exception as e:
         logging.error(f"Error handling document: {str(e)}")
         await message.reply_text("❌ Error processing file")
+
+@app.on_message(filters.document | filters.video | filters.audio | filters.photo)
+async def handle_telegram_download(client, message):
+    try:
+        user_id = message.from_user.id
+        progress_msg = await message.reply_text("⬇️ Starting download...")
+        
+        # Get file name based on message type
+        if message.document:
+            file_name = message.document.file_name
+        elif message.video:
+            file_name = message.video.file_name
+        elif message.audio:
+            file_name = message.audio.file_name
+        elif message.photo:
+            file_name = f"photo_{message.photo.file_unique_id}.jpg"
+        else:
+            file_name = f"file_{message.id}"
+            
+        # Generate unique file path
+        file_path = DOWNLOAD_DIR / file_name
+        
+        # Track download in database
+        downloads_db[progress_msg.id] = {
+            'file_path': str(file_path)
+        }
+        
+        # Progress callback for download
+        start_time = time.time()
+        last_update_time = start_time
+        last_downloaded = 0
+        
+        async def progress(current, total):
+            nonlocal last_update_time, last_downloaded
+            now = time.time()
+            
+            if now - last_update_time >= 3:
+                time_diff = now - last_update_time
+                size_diff = current - last_downloaded
+                speed = size_diff / time_diff if time_diff > 0 else 0
+                
+                percentage = (current * 100) / total
+                progress_text = (
+                    f"⬇️ Downloading:\n"
+                    f"[{create_progress_bar(percentage)}] {percentage:.1f}%\n"
+                    f"Speed: {format_speed(speed)}\n"
+                    f"Downloaded: {format_size(current)} / {format_size(total)}"
+                )
+                
+                try:
+                    await progress_msg.edit_text(progress_text)
+                except MessageNotModified:
+                    pass
+                    
+                last_update_time = now
+                last_downloaded = current
+        
+        # Download the file
+        await message.download(
+            file_name=str(file_path),
+            progress=progress
+        )
+        
+        # Show upload options
+        buttons = [[
+            InlineKeyboardButton("📤 Telegram", callback_data=f"telegram_{progress_msg.id}"),
+            InlineKeyboardButton("☁️ Cloud", callback_data=f"rclone_{progress_msg.id}")
+        ]]
+        
+        await progress_msg.edit_text(
+            "✅ Download complete! Choose upload destination:",
+            reply_markup=InlineKeyboardMarkup(buttons)
+        )
+        
+    except Exception as e:
+        logging.error(f"Error in telegram download: {str(e)}")
+        await message.reply_text("❌ Download failed")
+        
 
 @app.on_message(filters.text & filters.regex(r'https?://[^\s]+'))
 async def handle_url(client, message):
