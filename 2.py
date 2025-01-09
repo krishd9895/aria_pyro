@@ -53,8 +53,8 @@ def format_speed(speed):
     return format_size(speed) + "/s"
 
 def create_progress_bar(percentage):
-    completed = int(percentage / 5)
-    return "█" * completed + "░" * (20 - completed)
+    completed = int(percentage / 10)
+    return "█" * completed + "░" * (10 - completed)
 
 def get_rclone_config_path(user_id):
     return RCLONE_CONFIGS_DIR / str(user_id) / "rclone.conf"
