@@ -217,10 +217,13 @@ async def handle_telegram_download(client, message):
         )
         
         # Show upload options with file info
-        buttons = [[
-            InlineKeyboardButton("📤 Telegram", callback_data=f"telegram_{progress_msg.id}"),
-            InlineKeyboardButton("☁️ Cloud", callback_data=f"rclone_{progress_msg.id}")
-        ]]
+        buttons = [
+                [
+                    InlineKeyboardButton("📤 Telegram", callback_data=f"telegram_{progress_msg.id}"),
+                    InlineKeyboardButton("☁️ Cloud", callback_data=f"rclone_{progress_msg.id}")
+                ],
+                [InlineKeyboardButton("❌ Cancel", callback_data="cancel")]
+            ]
         
         complete_text = (
             f"✅ **Download complete!**\n"
@@ -382,10 +385,13 @@ async def handle_url(client, message):
             downloads_db[progress_msg.id]['file_name'] = file_name
             downloads_db[progress_msg.id]['file_size'] = file_size
             
-            buttons = [[
-                InlineKeyboardButton("📤 Telegram", callback_data=f"telegram_{progress_msg.id}"),
-                InlineKeyboardButton("☁️ Cloud", callback_data=f"rclone_{progress_msg.id}")
-            ]]
+            buttons = [
+                [
+                    InlineKeyboardButton("📤 Telegram", callback_data=f"telegram_{progress_msg.id}"),
+                    InlineKeyboardButton("☁️ Cloud", callback_data=f"rclone_{progress_msg.id}")
+                ],
+                [InlineKeyboardButton("❌ Cancel", callback_data="cancel")]
+            ]
             
             complete_text = (
                 f"✅ **Download complete!**\n"
