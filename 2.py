@@ -87,8 +87,8 @@ def list_folder_contents(user_id, remote, path=""):
 async def start_command(client, message):
     try:
         await message.reply_text(
-            "Hi! Send me a URL to download and upload as media. "
-            "For cloud storage uploads, send me your rclone.conf file first."
+            "Hi! Send me a URL to download and upload. "
+            
         )
     except Exception as e:
         logging.error(f"Error in start command: {str(e)}")
