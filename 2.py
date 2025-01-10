@@ -132,9 +132,14 @@ async def handle_document(client, message):
                 await message.reply_text("❌ No remotes found in config file!")
             
             logging.info(f"Rclone config saved for user {user_id}")
+        else:
+            # Forward to general download handler for non-rclone documents
+            await handle_telegram_download(client, message)
+            
     except Exception as e:
         logging.error(f"Error handling document: {str(e)}")
         await message.reply_text("❌ Error processing file")
+        await message.reply_text("❌ No remotes found in config file!")
 
 @app.on_message(filters.document | filters.video | filters.audio | filters.photo)
 async def handle_telegram_download(client, message):
