@@ -381,6 +381,7 @@ async def handle_telegram_upload(client, callback_query: CallbackQuery):
         file_path = download_info['file_path']
         file_name = download_info['file_name']
         file_size = download_info['file_size']
+        file_type = download_info.get('file_type', 'document')  # Get file type from download info
         message = callback_query.message
         
         # Initialize upload progress
@@ -393,12 +394,10 @@ async def handle_telegram_upload(client, callback_query: CallbackQuery):
             now = time.time()
             
             if now - last_update_time >= 3:
-                # Calculate speed
                 time_diff = now - last_update_time
                 size_diff = current - last_uploaded
                 speed = size_diff / time_diff if time_diff > 0 else 0
                 
-                # Update progress message
                 percentage = (current * 100) / total
                 progress_text = (
                     f"📤 **Uploading to Telegram**\n"
@@ -422,11 +421,47 @@ async def handle_telegram_upload(client, callback_query: CallbackQuery):
         )
         await message.edit_text(initial_text)
         
-        await callback_query.message.reply_document(
-            document=file_path,
-            progress=progress,
-            file_name=file_name  # Ensure original filename is preserved
-        )
+        # Determine file type and use appropriate upload method
+        file_ext = os.path.splitext(file_name)[1].lower()
+        
+        try:
+            if file_type == 'video' or file_ext in ['.mp4', '.mkv', '.avi', '.mov', '.flv']:
+                # Video files - will generate thumbnail automatically
+                await callback_query.message.reply_video(
+                    video=file_path,
+                    progress=progress,
+                    file_name=file_name,
+                    supports_streaming=True  # Enable streaming for videos
+                )
+            elif file_type == 'audio' or file_ext in ['.mp3', '.m4a', '.wav', '.ogg', '.flac']:
+                # Audio files - will generate waveform/duration automatically
+                await callback_query.message.reply_audio(
+                    audio=file_path,
+                    progress=progress,
+                    file_name=file_name
+                )
+            elif file_type == 'photo' or file_ext in ['.jpg', '.jpeg', '.png', '.webp']:
+                # Photo files
+                await callback_query.message.reply_photo(
+                    photo=file_path,
+                    progress=progress,
+                    file_name=file_name
+                )
+            else:
+                # Other files as documents
+                await callback_query.message.reply_document(
+                    document=file_path,
+                    progress=progress,
+                    file_name=file_name
+                )
+        except Exception as upload_error:
+            logging.error(f"Error during specific upload type, falling back to document: {str(upload_error)}")
+            # Fallback to document upload if specific media upload fails
+            await callback_query.message.reply_document(
+                document=file_path,
+                progress=progress,
+                file_name=file_name
+            )
         
         os.remove(file_path)
         del downloads_db[msg_id]
