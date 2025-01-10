@@ -247,41 +247,73 @@ async def handle_url(client, message):
         
         # Initial download message
         progress_msg = await message.reply_text(
-            f"🚀 Initiating download...\n"
-            f"🔗 URL: {url[:50]}..." if len(url) > 50 else url
+            f"🚀 **Initiating download...**\n"
+            f"🔗 **URL:** {url[:50]}..." if len(url) > 50 else url
         )
         logging.info(f"Starting download for user {user_id}")
         
         try:
             # Start download
             download = aria_api.add_uris([url], {'dir': str(DOWNLOAD_DIR)})
+            if not download or not download.gid:
+                raise Exception("Failed to start download")
+                
             downloads_db[progress_msg.id] = {
                 'gid': download.gid,
                 'file_path': None
             }
         except Exception as aria_error:
             error_message = str(aria_error).lower()
-            if "400" in error_message:
+            if "403" in error_message:
                 await progress_msg.edit_text(
-                    "❌ Download failed: Invalid URL or resource not found (HTTP 400)\n"
-                    "Please check if the URL is correct and accessible."
+                    "❌ **Download failed: Access Forbidden (HTTP 403)**\n"
+                    "The server rejected our request. This can happen if:\n"
+                    "• The URL requires authentication\n"
+                    "• The server blocks automated downloads\n"
+                    "• The content is region-restricted"
+                )
+            elif "400" in error_message:
+                await progress_msg.edit_text(
+                    "❌ **Download failed: Bad Request (HTTP 400)**\n"
+                    "• Check if the URL is correct and accessible\n"
+                    "• Try opening the URL in a browser first"
                 )
             else:
                 await progress_msg.edit_text(
-                    f"❌ Download failed: {str(aria_error)}\n"
-                    "Please try again."
+                    f"❌ **Download failed**\n"
+                    f"**Error:** {str(aria_error)}\n"
+                    "Please try again with a different URL."
                 )
             logging.error(f"Aria2c error for user {user_id}: {str(aria_error)}")
             return
             
         # Monitor download progress
         last_update = 0
-        stall_count = 0  # To track if download is stuck
+        stall_count = 0
         last_progress = 0
+        error_count = 0  # Track consecutive errors
         
-        while not download.is_complete:
+        while True:
             try:
-                download.update()
+                # Get fresh download status
+                download = aria_api.get_download(download.gid)
+                
+                # Check if download object is valid
+                if not download:
+                    await progress_msg.edit_text("❌ **Download failed: Lost connection to download**")
+                    return
+                    
+                # Check download status
+                if download.is_complete:
+                    break
+                elif download.has_failed:
+                    error_msg = download.error_message or "Unknown error"
+                    await progress_msg.edit_text(
+                        f"❌ **Download failed**\n"
+                        f"**Error:** {error_msg}"
+                    )
+                    return
+                
                 now = time.time()
                 
                 # Check if download is stuck
@@ -294,27 +326,22 @@ async def handle_url(client, message):
                 # If download is stuck for too long (30 seconds), abort
                 if stall_count >= 30:
                     await progress_msg.edit_text(
-                        "❌ Download failed: Connection timed out or resource unavailable\n"
-                        "Please check if the URL is still accessible."
+                        "❌ **Download failed: Connection timed out**\n"
+                        "• The download appears to be stuck\n"
+                        "• Please check if the URL is still accessible"
                     )
-                    aria_api.remove([download.gid])  # Remove stuck download
+                    try:
+                        aria_api.remove([download.gid])
+                    except:
+                        pass
                     return
                 
                 if now - last_update >= 3:  # Update every 3 seconds
-                    file_name = download.name if download.name else "Downloading..."
+                    file_name = download.name or "Downloading..."
                     percentage = download.progress
                     speed = download.download_speed
                     current = download.completed_length
                     total = download.total_length
-                    
-                    # Check for download errors
-                    if download.error_message:
-                        await progress_msg.edit_text(
-                            f"❌ Download failed: {download.error_message}\n"
-                            "Please try again or use a different URL."
-                        )
-                        aria_api.remove([download.gid])
-                        return
                     
                     progress_text = (
                         f"🔽 **Downloading**\n"
@@ -326,47 +353,61 @@ async def handle_url(client, message):
                     
                     await progress_msg.edit_text(progress_text)
                     last_update = now
+                    error_count = 0  # Reset error count on successful update
                 
                 await asyncio.sleep(1)
                 
             except MessageNotModified:
                 pass
             except Exception as e:
+                error_count += 1
                 logging.error(f"Error updating progress: {str(e)}")
-                await progress_msg.edit_text(
-                    "❌ Error monitoring download progress\n"
-                    "Download may continue in background."
-                )
+                
+                # If we get too many consecutive errors, abort
+                if error_count >= 5:
+                    await progress_msg.edit_text(
+                        "❌ **Download failed: Too many errors**\n"
+                        "The download may continue in background."
+                    )
+                    return
+                    
+                await asyncio.sleep(1)
         
-        # Download complete, show upload options
-        file_path = download.files[0].path
-        file_name = os.path.basename(file_path)
-        file_size = os.path.getsize(file_path)
-        
-        downloads_db[progress_msg.id]['file_path'] = file_path
-        downloads_db[progress_msg.id]['file_name'] = file_name
-        downloads_db[progress_msg.id]['file_size'] = file_size
-        
-        buttons = [[
-            InlineKeyboardButton("📤 Telegram", callback_data=f"telegram_{progress_msg.id}"),
-            InlineKeyboardButton("☁️ Cloud", callback_data=f"rclone_{progress_msg.id}")
-        ]]
-        
-        complete_text = (
-            f"✅ Download complete!\n"
-            f"📁 File: {file_name}\n"
-            f"📊 Size: {format_size(file_size)}\n"
-            f"🔽 Choose upload destination:"
-        )
-        
-        await progress_msg.edit_text(
-            complete_text,
-            reply_markup=InlineKeyboardMarkup(buttons)
-        )
+        # Download complete, process the file
+        if download.is_complete:
+            if not download.files or not download.files[0].path:
+                await progress_msg.edit_text("❌ **Download failed: Could not locate downloaded file**")
+                return
+                
+            file_path = download.files[0].path
+            file_name = os.path.basename(file_path)
+            file_size = os.path.getsize(file_path)
+            
+            downloads_db[progress_msg.id]['file_path'] = file_path
+            downloads_db[progress_msg.id]['file_name'] = file_name
+            downloads_db[progress_msg.id]['file_size'] = file_size
+            
+            buttons = [[
+                InlineKeyboardButton("📤 Telegram", callback_data=f"telegram_{progress_msg.id}"),
+                InlineKeyboardButton("☁️ Cloud", callback_data=f"rclone_{progress_msg.id}")
+            ]]
+            
+            complete_text = (
+                f"✅ **Download complete!**\n"
+                f"📄 **File:** {file_name}\n"
+                f"📏 **Size:** {format_size(file_size)}\n"
+                f"🔽 **Choose upload destination:**"
+            )
+            
+            await progress_msg.edit_text(
+                complete_text,
+                reply_markup=InlineKeyboardMarkup(buttons)
+            )
         
     except Exception as e:
         logging.error(f"Error in handle_url: {str(e)}")
-        await message.reply_text("❌ Error processing URL")
+        await message.reply_text("❌ **Error processing URL**")
+
         
 @app.on_callback_query(filters.regex("^telegram_"))
 async def handle_telegram_upload(client, callback_query: CallbackQuery):
