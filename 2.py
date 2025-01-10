@@ -267,16 +267,12 @@ async def handle_url(client, message):
             if "403" in error_message:
                 await progress_msg.edit_text(
                     "❌ **Download failed: Access Forbidden (HTTP 403)**\n"
-                    "The server rejected our request. This can happen if:\n"
-                    "• The URL requires authentication\n"
-                    "• The server blocks automated downloads\n"
-                    "• The content is region-restricted"
+                   
                 )
             elif "400" in error_message:
                 await progress_msg.edit_text(
                     "❌ **Download failed: Bad Request (HTTP 400)**\n"
-                    "• Check if the URL is correct and accessible\n"
-                    "• Try opening the URL in a browser first"
+                   
                 )
             else:
                 await progress_msg.edit_text(
@@ -327,8 +323,7 @@ async def handle_url(client, message):
                 if stall_count >= 30:
                     await progress_msg.edit_text(
                         "❌ **Download failed: Connection timed out**\n"
-                        "• The download appears to be stuck\n"
-                        "• Please check if the URL is still accessible"
+                        
                     )
                     try:
                         aria_api.remove([download.gid])
