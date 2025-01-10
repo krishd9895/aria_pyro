@@ -246,55 +246,128 @@ async def handle_url(client, message):
         user_id = message.from_user.id
         
         # Initial download message
-        progress_msg = await message.reply_text("⬇️ Starting download...")
+        progress_msg = await message.reply_text(
+            f"🚀 Initiating download...\n"
+            f"🔗 URL: {url[:50]}..." if len(url) > 50 else url
+        )
         logging.info(f"Starting download for user {user_id}")
-
-        # Start download
-        download = aria_api.add_uris([url], {'dir': str(DOWNLOAD_DIR)})
-        downloads_db[progress_msg.id] = {
-            'gid': download.gid,
-            'file_path': None
-        }
-
+        
+        try:
+            # Start download
+            download = aria_api.add_uris([url], {'dir': str(DOWNLOAD_DIR)})
+            downloads_db[progress_msg.id] = {
+                'gid': download.gid,
+                'file_path': None
+            }
+        except Exception as aria_error:
+            error_message = str(aria_error).lower()
+            if "400" in error_message:
+                await progress_msg.edit_text(
+                    "❌ Download failed: Invalid URL or resource not found (HTTP 400)\n"
+                    "Please check if the URL is correct and accessible."
+                )
+            else:
+                await progress_msg.edit_text(
+                    f"❌ Download failed: {str(aria_error)}\n"
+                    "Please try again."
+                )
+            logging.error(f"Aria2c error for user {user_id}: {str(aria_error)}")
+            return
+            
         # Monitor download progress
         last_update = 0
+        stall_count = 0  # To track if download is stuck
+        last_progress = 0
+        
         while not download.is_complete:
             try:
                 download.update()
                 now = time.time()
-                if now - last_update >= 3:  # Update every 3 seconds
-                    progress_text = (
-                        f"⬇️ Downloading:\n"
-                        f"[{create_progress_bar(download.progress)}] {download.progress:.1f}%\n"
-                        f"Speed: {download.download_speed_string()}\n"
-                        f"ETA: {download.eta_string()}"
+                
+                # Check if download is stuck
+                if download.progress == last_progress:
+                    stall_count += 1
+                else:
+                    stall_count = 0
+                    last_progress = download.progress
+                
+                # If download is stuck for too long (30 seconds), abort
+                if stall_count >= 30:
+                    await progress_msg.edit_text(
+                        "❌ Download failed: Connection timed out or resource unavailable\n"
+                        "Please check if the URL is still accessible."
                     )
+                    aria_api.remove([download.gid])  # Remove stuck download
+                    return
+                
+                if now - last_update >= 3:  # Update every 3 seconds
+                    file_name = download.name if download.name else "Downloading..."
+                    percentage = download.progress
+                    speed = download.download_speed
+                    current = download.completed_length
+                    total = download.total_length
+                    
+                    # Check for download errors
+                    if download.error_message:
+                        await progress_msg.edit_text(
+                            f"❌ Download failed: {download.error_message}\n"
+                            "Please try again or use a different URL."
+                        )
+                        aria_api.remove([download.gid])
+                        return
+                    
+                    progress_text = (
+                        f"🔽 **Downloading**\n"
+                        f"📄 **File:** {file_name}\n"
+                        f"{create_progress_bar(percentage)} {percentage:.1f}%\n"
+                        f"⚡ **Speed:** {format_speed(speed)}\n"
+                        f"📥 **Downloaded:** {format_size(current)} / {format_size(total)}"
+                    )
+                    
                     await progress_msg.edit_text(progress_text)
                     last_update = now
+                
                 await asyncio.sleep(1)
+                
             except MessageNotModified:
                 pass
             except Exception as e:
                 logging.error(f"Error updating progress: {str(e)}")
-
+                await progress_msg.edit_text(
+                    "❌ Error monitoring download progress\n"
+                    "Download may continue in background."
+                )
+        
         # Download complete, show upload options
         file_path = download.files[0].path
+        file_name = os.path.basename(file_path)
+        file_size = os.path.getsize(file_path)
+        
         downloads_db[progress_msg.id]['file_path'] = file_path
-
+        downloads_db[progress_msg.id]['file_name'] = file_name
+        downloads_db[progress_msg.id]['file_size'] = file_size
+        
         buttons = [[
             InlineKeyboardButton("📤 Telegram", callback_data=f"telegram_{progress_msg.id}"),
             InlineKeyboardButton("☁️ Cloud", callback_data=f"rclone_{progress_msg.id}")
         ]]
         
+        complete_text = (
+            f"✅ Download complete!\n"
+            f"📁 File: {file_name}\n"
+            f"📊 Size: {format_size(file_size)}\n"
+            f"🔽 Choose upload destination:"
+        )
+        
         await progress_msg.edit_text(
-            "✅ Download complete! Choose upload destination:",
+            complete_text,
             reply_markup=InlineKeyboardMarkup(buttons)
         )
         
     except Exception as e:
         logging.error(f"Error in handle_url: {str(e)}")
         await message.reply_text("❌ Error processing URL")
-
+        
 @app.on_callback_query(filters.regex("^telegram_"))
 async def handle_telegram_upload(client, callback_query: CallbackQuery):
     try:
@@ -302,10 +375,12 @@ async def handle_telegram_upload(client, callback_query: CallbackQuery):
         download_info = downloads_db.get(msg_id)
         
         if not download_info or not download_info['file_path']:
-            await callback_query.message.edit_text("❌ Download information not found")
+            await callback_query.message.edit_text("❌ **Download information not found**")
             return
             
         file_path = download_info['file_path']
+        file_name = download_info['file_name']
+        file_size = download_info['file_size']
         message = callback_query.message
         
         # Initialize upload progress
@@ -326,10 +401,11 @@ async def handle_telegram_upload(client, callback_query: CallbackQuery):
                 # Update progress message
                 percentage = (current * 100) / total
                 progress_text = (
-                    f"⬆️ Uploading to Telegram:\n"
-                    f"[{create_progress_bar(percentage)}] {percentage:.1f}%\n"
-                    f"Speed: {format_speed(speed)}\n"
-                    f"Uploaded: {format_size(current)} / {format_size(total)}"
+                    f"📤 **Uploading to Telegram**\n"
+                    f"📄 **File:** {file_name}\n"
+                    f"{create_progress_bar(percentage)} {percentage:.1f}%\n"
+                    f"⚡ **Speed:** {format_speed(speed)}\n"
+                    f"📤 **Uploaded:** {format_size(current)} / {format_size(total)}"
                 )
                 try:
                     await message.edit_text(progress_text)
@@ -339,21 +415,34 @@ async def handle_telegram_upload(client, callback_query: CallbackQuery):
                 last_update_time = now
                 last_uploaded = current
         
-        await message.edit_text("⬆️ Starting upload to Telegram...")
+        initial_text = (
+            f"📤 **Starting upload to Telegram...**\n"
+            f"📄 **File:** {file_name}\n"
+            f"📏 **Size:** {format_size(file_size)}"
+        )
+        await message.edit_text(initial_text)
+        
         await callback_query.message.reply_document(
             document=file_path,
-            progress=progress
+            progress=progress,
+            file_name=file_name  # Ensure original filename is preserved
         )
         
         os.remove(file_path)
         del downloads_db[msg_id]
         
-        await message.edit_text("✅ Upload complete!")
-        logging.info("Telegram upload completed")
+        complete_text = (
+            f"✅ **Upload complete!**\n"
+            f"📄 **File:** {file_name}\n"
+            f"📏 **Size:** {format_size(file_size)}"
+        )
+        await message.edit_text(complete_text)
+        logging.info(f"Telegram upload completed for file: {file_name}")
         
     except Exception as e:
         logging.error(f"Error in telegram upload: {str(e)}")
-        await callback_query.message.edit_text("❌ Upload failed")
+        await callback_query.message.edit_text("❌ **Upload failed**")
+
 
 @app.on_callback_query(filters.regex("^rclone_"))
 async def handle_rclone_selection(client, callback_query: CallbackQuery):
