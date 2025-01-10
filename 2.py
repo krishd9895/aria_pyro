@@ -145,26 +145,38 @@ async def handle_document(client, message):
 async def handle_telegram_download(client, message):
     try:
         user_id = message.from_user.id
-        progress_msg = await message.reply_text("⬇️ Starting download...")
         
-        # Get file name based on message type
+        # Get file name and size based on message type
         if message.document:
             file_name = message.document.file_name
+            file_size = message.document.file_size
         elif message.video:
             file_name = message.video.file_name
+            file_size = message.video.file_size
         elif message.audio:
             file_name = message.audio.file_name
+            file_size = message.audio.file_size
         elif message.photo:
             file_name = f"photo_{message.photo.file_unique_id}.jpg"
+            file_size = message.photo.file_size
         else:
             file_name = f"file_{message.id}"
+            file_size = 0
+            
+        progress_msg = await message.reply_text(
+            f"🔽 **Starting download...**\n"
+            f"📄 **File:** {file_name}\n"
+            f"📏 **Size:** {format_size(file_size)}"
+        )
             
         # Generate unique file path
         file_path = DOWNLOAD_DIR / file_name
         
         # Track download in database
         downloads_db[progress_msg.id] = {
-            'file_path': str(file_path)
+            'file_path': str(file_path),
+            'file_name': file_name,
+            'file_size': file_size
         }
         
         # Progress callback for download
@@ -183,10 +195,11 @@ async def handle_telegram_download(client, message):
                 
                 percentage = (current * 100) / total
                 progress_text = (
-                    f"⬇️ Downloading:\n"
-                    f"[{create_progress_bar(percentage)}] {percentage:.1f}%\n"
-                    f"Speed: {format_speed(speed)}\n"
-                    f"Downloaded: {format_size(current)} / {format_size(total)}"
+                    f"🔽 **Downloading**\n"
+                    f"📄 **File:** {file_name}\n"
+                    f"{create_progress_bar(percentage)} {percentage:.1f}%\n"
+                    f"⚡ **Speed:** {format_speed(speed)}\n"
+                    f"📥 **Downloaded:** {format_size(current)} / {format_size(total)}"
                 )
                 
                 try:
@@ -203,20 +216,27 @@ async def handle_telegram_download(client, message):
             progress=progress
         )
         
-        # Show upload options
+        # Show upload options with file info
         buttons = [[
             InlineKeyboardButton("📤 Telegram", callback_data=f"telegram_{progress_msg.id}"),
             InlineKeyboardButton("☁️ Cloud", callback_data=f"rclone_{progress_msg.id}")
         ]]
         
+        complete_text = (
+            f"✅ **Download complete!**\n"
+            f"📄 **File:** {file_name}\n"
+            f"📏 **Size:** {format_size(file_size)}\n"
+            f"💾 **Choose upload destination:**"
+        )
+        
         await progress_msg.edit_text(
-            "✅ Download complete! Choose upload destination:",
+            complete_text,
             reply_markup=InlineKeyboardMarkup(buttons)
         )
         
     except Exception as e:
         logging.error(f"Error in telegram download: {str(e)}")
-        await message.reply_text("❌ Download failed")
+        await message.reply_text("❌ **Download failed**")
         
 
 @app.on_message(filters.text & filters.regex(r'https?://[^\s]+'))
