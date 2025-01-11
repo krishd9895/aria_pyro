@@ -9,6 +9,7 @@ from pathlib import Path
 import mimetypes
 import subprocess
 import configparser
+import re
 import logging
 
 # Simple logging setup
@@ -242,10 +243,47 @@ async def handle_telegram_download(client, message):
         await message.reply_text("❌ **Download failed**")
         
 
-@app.on_message(filters.text & filters.regex(r'https?://[^\s]+'))
+@app.on_message(filters.command("l"))
 async def handle_url(client, message):
     try:
-        url = message.text
+        # Extract URL and filename from command
+        command_parts = message.text.split()
+        url = None
+        custom_filename = None
+        
+        # Handle reply to URL message
+        if message.reply_to_message and message.reply_to_message.text:
+            # Check if the replied message contains a URL
+            urls = re.findall(r'https?://[^\s]+', message.reply_to_message.text)
+            if urls:
+                url = urls[0]
+                # Check if filename was provided with command
+                if len(command_parts) > 1:
+                    if command_parts[1] == '-n' and len(command_parts) > 2:
+                        custom_filename = command_parts[2]
+                    else:
+                        custom_filename = command_parts[1]
+        
+        # Handle direct command with URL
+        else:
+            if len(command_parts) > 1:
+                url = command_parts[1]
+                # Check for filename after URL
+                if len(command_parts) > 2:
+                    if command_parts[2] == '-n' and len(command_parts) > 3:
+                        custom_filename = command_parts[3]
+                    elif '-n' not in command_parts:
+                        custom_filename = command_parts[2]
+        
+        if not url:
+            await message.reply_text(
+                "❌ **Invalid usage!**\n"
+                "**Usage:**\n"
+                "• `/l <url> [-n filename.ext]`\n"
+                "• Reply to a URL with `/l [filename.ext]`"
+            )
+            return
+            
         user_id = message.from_user.id
         
         # Initial download message
@@ -256,8 +294,13 @@ async def handle_url(client, message):
         logging.info(f"Starting download for user {user_id}")
         
         try:
+            # Set download options
+            options = {'dir': str(DOWNLOAD_DIR)}
+            if custom_filename:
+                options['out'] = custom_filename
+                
             # Start download
-            download = aria_api.add_uris([url], {'dir': str(DOWNLOAD_DIR)})
+            download = aria_api.add_uris([url], options)
             if not download or not download.gid:
                 raise Exception("Failed to start download")
                 
@@ -270,12 +313,10 @@ async def handle_url(client, message):
             if "403" in error_message:
                 await progress_msg.edit_text(
                     "❌ **Download failed: Access Forbidden (HTTP 403)**\n"
-                   
                 )
             elif "400" in error_message:
                 await progress_msg.edit_text(
                     "❌ **Download failed: Bad Request (HTTP 400)**\n"
-                   
                 )
             else:
                 await progress_msg.edit_text(
@@ -326,7 +367,6 @@ async def handle_url(client, message):
                 if stall_count >= 30:
                     await progress_msg.edit_text(
                         "❌ **Download failed: Connection timed out**\n"
-                        
                     )
                     try:
                         aria_api.remove([download.gid])
