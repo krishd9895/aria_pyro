@@ -9,8 +9,12 @@ from pathlib import Path
 import mimetypes
 import subprocess
 import configparser
-import re
 import logging
+import re
+from yt_dlp import YoutubeDL
+from urllib.parse import urlparse
+import math
+
 
 # Simple logging setup
 logging.basicConfig(
@@ -32,8 +36,8 @@ RCLONE_CONFIGS_DIR.mkdir(exist_ok=True)
 app = Client(
     "my_bot",
     api_id="2",
-    api_hash="905",
-    bot_token="7A-E"
+    api_hash="91",
+    bot_token="7E"
 )
 
 aria2 = ariaClient(
@@ -449,6 +453,133 @@ async def handle_url(client, message):
         logging.error(f"Error in handle_url: {str(e)}")
         await message.reply_text("❌ **Error processing URL**")
 
+@app.on_message(filters.command("yl"))
+async def handle_ytdl(client, message):
+    try:
+        # Extract URL and filename from command
+        command_parts = message.text.split()
+        url = None
+        custom_filename = None
+        
+        # Handle reply to URL message
+        if message.reply_to_message and message.reply_to_message.text:
+            # Check if the replied message contains a URL
+            urls = re.findall(r'https?://[^\s]+', message.reply_to_message.text)
+            if urls:
+                url = urls[0]
+                # Check if filename was provided with command
+                if len(command_parts) > 1:
+                    if command_parts[1] == '-n' and len(command_parts) > 2:
+                        custom_filename = command_parts[2]
+                    else:
+                        custom_filename = command_parts[1]
+        
+        # Handle direct command with URL
+        else:
+            if len(command_parts) > 1:
+                url = command_parts[1]
+                # Check for filename after URL
+                if len(command_parts) > 2:
+                    if command_parts[2] == '-n' and len(command_parts) > 3:
+                        custom_filename = command_parts[3]
+                    elif '-n' not in command_parts:
+                        custom_filename = command_parts[2]
+        
+        if not url:
+            await message.reply_text(
+                "❌ **Invalid usage!**\n"
+                "**Usage:**\n"
+                "• `/yl <url> [-n filename.ext]`\n"
+                "• Reply to a URL with `/yl [filename.ext]`"
+            )
+            return
+
+        # Initial download message
+        progress_msg = await message.reply_text(
+            f"🚀 **Initiating download...**\n"
+            f"🔗 **URL:** {url[:50]}..." if len(url) > 50 else url
+        )
+        
+        # Configure base yt-dlp options
+        ydl_opts = {
+            'quiet': True,
+            'no_warnings': True,
+            'nooverwrites': True,
+            'outtmpl': os.path.join(DOWNLOAD_DIR, '%(title)s.%(ext)s'),
+        }
+        
+        # Update format based on URL type
+        if url.startswith("https://drive.google.com"):
+            ydl_opts.update({'format': 'source'})
+        else:
+            ydl_opts.update({'format': 'best'})
+            
+        # If custom filename is provided, set the output template
+        if custom_filename:
+            base, ext = os.path.splitext(custom_filename)
+            if not ext:  # If no extension provided, let yt-dlp handle it
+                ydl_opts['outtmpl'] = os.path.join(DOWNLOAD_DIR, base + '.%(ext)s')
+            else:
+                ydl_opts['outtmpl'] = os.path.join(DOWNLOAD_DIR, custom_filename)
+
+        try:
+            # Download using yt-dlp
+            with YoutubeDL(ydl_opts) as ydl:
+                await progress_msg.edit_text("⏳ **Extracting information...**")
+                info = ydl.extract_info(url, download=True)
+                filename = ydl.prepare_filename(info)
+                
+            if not filename or not os.path.exists(filename):
+                await progress_msg.edit_text("❌ **Download failed: Could not locate downloaded file**")
+                return
+                
+            file_size = os.path.getsize(filename)
+            
+            # Store download information
+            downloads_db[progress_msg.id] = {
+                'file_path': filename,
+                'file_name': os.path.basename(filename),
+                'file_size': file_size
+            }
+            
+            # Create upload buttons
+            buttons = [
+                [
+                    InlineKeyboardButton("📤 Telegram", callback_data=f"telegram_{progress_msg.id}"),
+                    InlineKeyboardButton("☁️ Cloud", callback_data=f"rclone_{progress_msg.id}")
+                ],
+                [InlineKeyboardButton("❌ Cancel", callback_data="cancel")]
+            ]
+            
+            complete_text = (
+                f"✅ **Download complete!**\n"
+                f"📄 **File:** {os.path.basename(filename)}\n"
+                f"📏 **Size:** {format_size(file_size)}\n"
+                f"🔽 **Choose upload destination:**"
+            )
+            
+            await progress_msg.edit_text(
+                complete_text,
+                reply_markup=InlineKeyboardMarkup(buttons)
+            )
+            
+        except Exception as ydl_error:
+            error_message = str(ydl_error).lower()
+            if "copyright" in error_message:
+                await progress_msg.edit_text("❌ **Download failed: Content is copyright protected**")
+            elif "private" in error_message:
+                await progress_msg.edit_text("❌ **Download failed: Content is private or unavailable**")
+            else:
+                await progress_msg.edit_text(
+                    f"❌ **Download failed**\n"
+                    f"**Error:** {str(ydl_error)}"
+                )
+            logging.error(f"YT-DLP error: {str(ydl_error)}")
+            return
+            
+    except Exception as e:
+        logging.error(f"Error in handle_ytdl: {str(e)}")
+        await message.reply_text("❌ **Error processing URL**")
         
 @app.on_callback_query(filters.regex("^telegram_"))
 async def handle_telegram_upload(client, callback_query: CallbackQuery):
