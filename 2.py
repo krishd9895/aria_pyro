@@ -17,6 +17,9 @@ from urllib.parse import urlparse
 import uuid
 import ffmpeg
 import math
+import platform
+from datetime import datetime
+import psutil
 
 
 # Simple logging setup
@@ -40,7 +43,7 @@ app = Client(
     "my_bot",
     api_id="2",
     api_hash="95",
-    bot_token="70"
+    bot_token="7"
 )
 
 aria2 = ariaClient(
@@ -91,6 +94,9 @@ def list_folder_contents(user_id, remote, path=""):
         logging.error(f"Error listing folders: {str(e)}")
         return []
 
+
+ 
+   
 @app.on_message(filters.command("start"))
 async def start_command(client, message):
     try:
@@ -101,6 +107,69 @@ async def start_command(client, message):
     except Exception as e:
         logging.error(f"Error in start command: {str(e)}")
 
+@app.on_message(filters.command("stats"))
+async def stats_command(client, message):
+    try:
+        # OS Information
+        uname = platform.uname()
+        
+        # Boot time info and uptime calculation
+        try:
+            boot_time = psutil.boot_time()
+            boot_time_date = datetime.fromtimestamp(boot_time)
+            uptime = datetime.now() - boot_time_date
+            uptime_str = f"{uptime.days}d {uptime.seconds // 3600}h {(uptime.seconds // 60) % 60}m {uptime.seconds % 60}s"
+        except PermissionError:
+            uptime_str = "Permission denied"
+        
+        # CPU Information
+        cpu_physical = psutil.cpu_count(logical=False)
+        cpu_logical = psutil.cpu_count(logical=True)
+        
+        # Memory Information
+        try:
+            memory = psutil.virtual_memory()
+            total_mem = memory.total / (1024 ** 3)  # Convert bytes to GB
+            used_mem = memory.used / (1024 ** 3)
+            available_mem = memory.available / (1024 ** 3)
+            percentage_mem = memory.percent
+        except PermissionError:
+            total_mem = used_mem = available_mem = percentage_mem = 0
+
+        # Disk Information
+        disk_usage = psutil.disk_usage('/')
+        total_disk = disk_usage.total / (1024 ** 3)  # Convert bytes to GB
+        used_disk = disk_usage.used / (1024 ** 3)
+        free_disk = disk_usage.free / (1024 ** 3)
+        percentage_disk = disk_usage.percent
+
+        # Constructing the message with system information
+        info_message = (
+            f"🖥️ **OS SYSTEM:**\n"
+            f"┠ **OS Uptime:** {uptime_str}\n"
+            f"┠ **OS Version:** {uname.version}\n"
+            f"┖ **OS Arch:** {platform.platform()}\n\n"
+
+            f"🖥️ **CPU Information:**\n"
+            f"┠ **Physical Cores:** {cpu_physical}\n"
+            f"┠ **Logical Cores:** {cpu_logical}\n\n"
+
+            f"💾 **RAM (MEMORY):**\n"
+            f"┃ [{('■' * (int(percentage_mem) // 10))}{('□' * (10 - (int(percentage_mem) // 10)))}] {percentage_mem}%\n"
+            f"┖ **Used:** {used_mem:.2f}GB | **Free:** {available_mem:.2f}GB | **Total:** {total_mem:.2f}GB\n\n"
+
+            f"💽 **DISK STORAGE:**\n"
+            f"┃ [{('■' * (int(percentage_disk) // 10))}{('□' * (10 - (int(percentage_disk) // 10)))}] {percentage_disk}%\n"
+            f"┖ **Used:** {used_disk:.2f}GB | **Free:** {free_disk:.2f}GB | **Total:** {total_disk:.2f}GB"
+        )
+
+        
+        await message.reply_text(info_message)
+
+    except Exception as e:
+        logging.error(f"Error in stats command: {str(e)}")
+        await message.reply_text("An error occurred while retrieving system stats.")
+        
 @app.on_message(filters.document)
 async def handle_document(client, message):
     try:
@@ -290,6 +359,33 @@ async def handle_url(client, message):
                 "• Reply to a URL with `/l [filename.ext]`"
             )
             return
+        
+        # Check if URL is a Telegram message URL
+        url_pattern = r"https://t.me/(.+?)/(\d+)(\?single)?"
+        match = re.match(url_pattern, url)
+        
+        if match:
+            # Handle Telegram URL
+            from_chat_id = match.group(1)  # Extract the chat username
+            message_id = int(match.group(2))  # Extract the message ID
+            
+            try:
+                # Copy the message to the user's chat
+                copied_message = await client.copy_message(
+                    chat_id=message.chat.id,  # Send back to the user
+                    from_chat_id=from_chat_id,
+                    message_id=message_id,
+                    disable_notification=True  # Optional: send silently
+                )
+                await message.reply_text(
+                    f"✅ **Message copied successfully!**\n"
+                    f"📝 **Copied message ID:** {copied_message.id}\n"
+                    f"📍 **To chat:** {message.chat.id}"
+                )
+                return
+            except Exception as e:
+                await message.reply_text(f"❌ **Error copying message:** {str(e)}")
+                return
             
         user_id = message.from_user.id
         
@@ -300,6 +396,7 @@ async def handle_url(client, message):
         )
         logging.info(f"Starting download for user {user_id}")
         
+        # Rest of the original function remains the same
         try:
             # Set download options
             options = {'dir': str(DOWNLOAD_DIR)}
@@ -455,7 +552,7 @@ async def handle_url(client, message):
     except Exception as e:
         logging.error(f"Error in handle_url: {str(e)}")
         await message.reply_text("❌ **Error processing URL**")
-
+        
 @app.on_message(filters.command("yl"))
 async def handle_ytdl(client, message):
     try:
