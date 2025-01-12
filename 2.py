@@ -5,6 +5,7 @@ from aria2p import API, Client as ariaClient
 import os
 import asyncio
 import time
+import pathlib
 from pathlib import Path
 import mimetypes
 import subprocess
@@ -13,6 +14,8 @@ import logging
 import re
 from yt_dlp import YoutubeDL
 from urllib.parse import urlparse
+import uuid
+import ffmpeg
 import math
 
 
@@ -36,8 +39,8 @@ RCLONE_CONFIGS_DIR.mkdir(exist_ok=True)
 app = Client(
     "my_bot",
     api_id="2",
-    api_hash="91",
-    bot_token="7E"
+    api_hash="95",
+    bot_token="70"
 )
 
 aria2 = ariaClient(
@@ -580,6 +583,24 @@ async def handle_ytdl(client, message):
     except Exception as e:
         logging.error(f"Error in handle_ytdl: {str(e)}")
         await message.reply_text("❌ **Error processing URL**")
+
+        
+def get_metadata(video_path):
+    width, height, duration = 1280, 720, 0
+    try:
+        video_streams = ffmpeg.probe(video_path, select_streams="v")
+        for item in video_streams.get("streams", []):
+            height = item["height"]
+            width = item["width"]
+        duration = int(float(video_streams["format"]["duration"]))
+    except Exception as e:
+        logging.error(e)
+    try:
+        thumb = pathlib.Path(video_path).parent.joinpath(f"{uuid.uuid4().hex}-thunmnail.png").as_posix()
+        ffmpeg.input(video_path, ss=duration / 2).filter("scale", width, -1).output(thumb, vframes=1).run()
+    except ffmpeg._run.Error:
+        thumb = None
+    return dict(height=height, width=width, duration=duration, thumb=thumb)
         
 @app.on_callback_query(filters.regex("^telegram_"))
 async def handle_telegram_upload(client, callback_query: CallbackQuery):
@@ -594,7 +615,7 @@ async def handle_telegram_upload(client, callback_query: CallbackQuery):
         file_path = download_info['file_path']
         file_name = download_info['file_name']
         file_size = download_info['file_size']
-        file_type = download_info.get('file_type', 'document')  # Get file type from download info
+        file_type = download_info.get('file_type', 'document')
         message = callback_query.message
         
         # Initialize upload progress
@@ -639,29 +660,41 @@ async def handle_telegram_upload(client, callback_query: CallbackQuery):
         
         try:
             if file_type == 'video' or file_ext in ['.mp4', '.mkv', '.avi', '.mov', '.flv']:
-                # Video files - will generate thumbnail automatically
-                await callback_query.message.reply_video(
-                    video=file_path,
-                    progress=progress,
-                    file_name=file_name,
-                    supports_streaming=True  # Enable streaming for videos
-                )
+                # Get video metadata including thumbnail
+                meta = get_metadata(file_path)
+                thumb_path = meta.pop('thumb', None)
+                
+                try:
+                    # Upload video with metadata
+                    await callback_query.message.reply_video(
+                        video=file_path,
+                        progress=progress,
+                        file_name=file_name,
+                        thumb=thumb_path,
+                        supports_streaming=True,
+                        **meta  # Includes height, width, duration
+                    )
+                finally:
+                    # Clean up thumbnail if it was created
+                    if thumb_path and os.path.exists(thumb_path):
+                        try:
+                            os.remove(thumb_path)
+                        except Exception as e:
+                            logging.error(f"Error removing thumbnail: {str(e)}")
+                            
             elif file_type == 'audio' or file_ext in ['.mp3', '.m4a', '.wav', '.ogg', '.flac']:
-                # Audio files - will generate waveform/duration automatically
                 await callback_query.message.reply_audio(
                     audio=file_path,
                     progress=progress,
                     file_name=file_name
                 )
             elif file_type == 'photo' or file_ext in ['.jpg', '.jpeg', '.png', '.webp']:
-                # Photo files
                 await callback_query.message.reply_photo(
                     photo=file_path,
                     progress=progress,
                     file_name=file_name
                 )
             else:
-                # Other files as documents
                 await callback_query.message.reply_document(
                     document=file_path,
                     progress=progress,
@@ -690,7 +723,6 @@ async def handle_telegram_upload(client, callback_query: CallbackQuery):
     except Exception as e:
         logging.error(f"Error in telegram upload: {str(e)}")
         await callback_query.message.edit_text("❌ **Upload failed**")
-
 
 @app.on_callback_query(filters.regex("^rclone_"))
 async def handle_rclone_selection(client, callback_query: CallbackQuery):
