@@ -672,6 +672,7 @@ async def handle_telegram_upload(client, callback_query: CallbackQuery):
                         file_name=file_name,
                         thumb=thumb_path,
                         supports_streaming=True,
+                        caption=file_name,
                         **meta  # Includes height, width, duration
                     )
                 finally:
