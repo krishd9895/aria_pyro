@@ -907,67 +907,115 @@ async def handle_remote_navigation(client, callback_query: CallbackQuery):
 @app.on_callback_query(filters.regex("^upload_"))
 async def handle_rclone_upload(client, callback_query: CallbackQuery):
     try:
+        # Extract callback data
         data = callback_query.data.split('_')
         remote = data[1]
         path = data[2] if len(data) > 2 else ""
         user_id = callback_query.from_user.id
         message = callback_query.message
-        
-        # Get the file path from downloads_db
+
+        # Get download information
         msg_id = message.id
         if msg_id not in downloads_db or not downloads_db[msg_id]['file_path']:
             await message.edit_text("❌ Download information not found")
             return
-        
+
         file_path = downloads_db[msg_id]['file_path']
         config_path = get_rclone_config_path(user_id)
-        
+
+        # Validate config exists
+        if not config_path.exists():
+            await message.edit_text("❌ Rclone config not found. Please upload your config first.")
+            return
+
         await message.edit_text("⬆️ Starting upload to cloud storage...")
-        
-        # Start rclone upload with progress monitoring
-        process = subprocess.Popen(
-            [
+
+        # Upload progress variables
+        transferred_size = '0 B'
+        percentage = '0%'
+        speed = '0 B/s'
+        eta = '-'
+        process = None
+        is_cancelled = False
+
+        async def update_progress():
+            nonlocal transferred_size, percentage, speed, eta, process, is_cancelled
+            while not (process is None or is_cancelled):
+                try:
+                    data = (await process.stdout.readline()).decode()
+                except:
+                    continue
+                if not data:
+                    break
+                if "Transferred:" in data:
+                    match = re.search(
+                        r"Transferred:\s+([\d.]+\s*\w+)\s+/\s+([\d.]+\s*\w+),\s+([\d.]+%)\s*,\s+([\d.]+\s*\w+/s),\s+ETA\s+([\dwdhms]+)",
+                        data
+                    )
+                    if match:
+                        transferred, total, percentage, speed, eta = match.groups()
+                        progress_value = float(percentage[:-1])
+                        progress_text = "\n".join([
+                            f"📄 **File:** {os.path.basename(file_path)}",
+                            f"{create_progress_bar(progress_value)} {progress_value:.1f}%",
+                            f"⚡ **Speed:** {speed}",
+                            f"📤 **Uploaded:** {transferred} / {total}",
+                            f"⏳ **ETA:** {eta}"
+                        ])
+                        try:
+                            await message.edit_text(progress_text)
+                        except MessageNotModified:
+                            pass
+
+        try:
+            # Start rclone process
+            process = await asyncio.create_subprocess_exec(
                 "rclone",
                 "copy",
                 "--progress",
                 "--config",
                 str(config_path),
                 file_path,
-                f"{remote}:{path}"
-            ],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            universal_newlines=True
-        )
-        
-        last_update = 0
-        while True:
-            line = process.stdout.readline()
-            if not line and process.poll() is not None:
-                break
-                
-            if time.time() - last_update >= 3:
-                if "Transferred:" in line:
-                    try:
-                        await message.edit_text(
-                            f"⬆️ Uploading to cloud storage:\n{line}"
-                        )
-                    except MessageNotModified:
-                        pass
-                    last_update = time.time()
-        
-        if process.returncode == 0:
+                f"{remote}:{path}",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+
+            # Monitor progress and wait for completion
+            await asyncio.gather(
+                update_progress(),
+                process.wait()
+            )
+
+            if is_cancelled:
+                return False
+
+            # Check upload result
+            if process.returncode == 0:
+                success = True
+            else:
+                error = (await process.stderr.read()).decode().strip()
+                logging.error(f"Rclone upload failed: {error}")
+                success = False
+
+        except Exception as e:
+            logging.error(f"Error during rclone upload: {str(e)}")
+            success = False
+
+        # Final message and cleanup
+        if success:
             await message.edit_text("✅ Upload to cloud storage complete!")
         else:
             await message.edit_text("❌ Upload to cloud storage failed!")
-        
-        # Clean up
-        os.remove(file_path)
-        del downloads_db[msg_id]
-        
+
+        if os.path.exists(file_path):
+            os.remove(file_path)
+        if msg_id in downloads_db:
+            del downloads_db[msg_id]
+
     except Exception as e:
-        logging.error(f"Error in rclone upload: {str(e)}")
-        await callback_query.message.edit_text("❌ Error during upload")
+        logging.error(f"Error during rclone upload: {str(e)}")
+        await message.edit_text("❌ Error during upload to cloud storage")
 
 @app.on_callback_query(filters.regex("^cancel"))
 async def handle_cancel(client, callback_query: CallbackQuery):
