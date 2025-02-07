@@ -31,6 +31,7 @@ logging.basicConfig(
 
 # Global storage
 downloads_db = {}
+uploads_db = {}  # New dictionary to track uploads
 pending_rclone_users = set()  # Store users waiting for rclone.conf
 
 DOWNLOAD_DIR = Path("Downloads")
@@ -47,7 +48,7 @@ RCLONE_CONFIGS_DIR.mkdir(exist_ok=True)
 app = Client(
     "my_bot",
     api_id="2",
-    api_hash="95",
+    api_hash="92",
     bot_token="7"
 )
 
@@ -248,7 +249,10 @@ async def handle_telegram_download(client, message):
         progress_msg = await message.reply_text(
             f"🔽 **Starting download...**\n"
             f"📄 **File:** {file_name}\n"
-            f"📏 **Size:** {format_size(file_size)}"
+            f"📏 **Size:** {format_size(file_size)}",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("❌ Cancel", callback_data="cancel")]
+            ])
         )
             
         # Generate unique file path
@@ -286,7 +290,9 @@ async def handle_telegram_download(client, message):
                 )
                 
                 try:
-                    await progress_msg.edit_text(progress_text)
+                    await progress_msg.edit_text(progress_text, reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("❌ Cancel", callback_data="cancel")]
+                    ]))
                 except MessageNotModified:
                     pass
                     
@@ -398,7 +404,10 @@ async def handle_url(client, message):
         # Initial download message
         progress_msg = await message.reply_text(
             f"🚀 **Initiating download...**\n"
-            f"🔗 **URL:** {url[:50]}..." if len(url) > 50 else url
+            f"🔗 **URL:** {url[:50]}..." if len(url) > 50 else url,
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("❌ Cancel", callback_data="cancel")]
+            ])
         )
         logging.info(f"Starting download for user {user_id}")
         
@@ -499,7 +508,9 @@ async def handle_url(client, message):
                         f"📥 **Downloaded:** {format_size(current)} / {format_size(total)}"
                     )
                     
-                    await progress_msg.edit_text(progress_text)
+                    await progress_msg.edit_text(progress_text, reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("❌ Cancel", callback_data="cancel")]
+                    ]))
                     last_update = now
                     error_count = 0  # Reset error count on successful update
                 
@@ -743,8 +754,11 @@ async def handle_telegram_upload(client, callback_query: CallbackQuery):
                     f"⚡ **Speed:** {format_speed(speed)}\n"
                     f"📤 **Uploaded:** {format_size(current)} / {format_size(total)}"
                 )
+                
                 try:
-                    await message.edit_text(progress_text)
+                    await message.edit_text(progress_text, reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("❌ Cancel", callback_data="cancel")]
+                    ]))
                 except MessageNotModified:
                     pass
                 
@@ -767,6 +781,12 @@ async def handle_telegram_upload(client, callback_query: CallbackQuery):
                 meta = get_metadata(file_path)
                 thumb_path = meta.pop('thumb', None)
                 
+                # Add process to uploads_db for cancellation
+                uploads_db[message.id] = {
+                    'ffmpeg_process': None,
+                    'temp_files': [thumb_path] if thumb_path else []
+                }
+                
                 try:
                     # Upload video with metadata
                     await callback_query.message.reply_video(
@@ -785,7 +805,6 @@ async def handle_telegram_upload(client, callback_query: CallbackQuery):
                             os.remove(thumb_path)
                         except Exception as e:
                             logging.error(f"Error removing thumbnail: {str(e)}")
-                            
             elif file_type == 'audio' or file_ext in ['.mp3', '.m4a', '.wav', '.ogg', '.flac']:
                 await callback_query.message.reply_audio(
                     audio=file_path,
@@ -804,6 +823,10 @@ async def handle_telegram_upload(client, callback_query: CallbackQuery):
                     progress=progress,
                     file_name=file_name
                 )
+        except asyncio.TimeoutError:
+            logging.error("Upload timed out")
+            await message.edit_text("❌ Upload timed out")
+            return
         except Exception as upload_error:
             logging.error(f"Error during specific upload type, falling back to document: {str(upload_error)}")
             # Fallback to document upload if specific media upload fails
@@ -934,7 +957,9 @@ async def handle_rclone_upload(client, callback_query: CallbackQuery):
             await message.edit_text("❌ Rclone config not found. Please upload your config first.")
             return
 
-        await message.edit_text("⬆️ Starting upload to cloud storage...")
+        await message.edit_text("⬆️ Starting upload to cloud storage...", reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("❌ Cancel", callback_data="cancel")]
+        ]))
 
         # Upload progress variables
         transferred_size = '0 B'
@@ -968,8 +993,11 @@ async def handle_rclone_upload(client, callback_query: CallbackQuery):
                             f"📤 **Uploaded:** {transferred} / {total}",
                             f"⏳ **ETA:** {eta}"
                         ])
+                        
                         try:
-                            await message.edit_text(progress_text)
+                            await message.edit_text(progress_text, reply_markup=InlineKeyboardMarkup([
+                                [InlineKeyboardButton("❌ Cancel", callback_data="cancel")]
+                            ]))
                         except MessageNotModified:
                             pass
 
@@ -1026,16 +1054,83 @@ async def handle_rclone_upload(client, callback_query: CallbackQuery):
 @app.on_callback_query(filters.regex("^cancel"))
 async def handle_cancel(client, callback_query: CallbackQuery):
     try:
-        # Check if there's a download to cancel
         msg_id = callback_query.message.id
+        
+        # Handle Aria2c download cancellation
+        if msg_id in downloads_db and downloads_db[msg_id].get('gid'):
+            gid = downloads_db[msg_id]['gid']
+            try:
+                download = aria_api.get_download(gid)
+                if download and download.is_active:
+                    aria_api.remove([gid], force=True)
+                    logging.info(f"Aria2c download cancelled: {gid}")
+                
+                # Clean up partial files
+                file_path = downloads_db[msg_id].get('file_path')
+                if file_path and os.path.exists(file_path):
+                    try:
+                        os.remove(file_path)
+                        logging.info(f"Removed partial file: {file_path}")
+                    except OSError as e:
+                        logging.error(f"Error removing partial file: {str(e)}")
+                
+                del downloads_db[msg_id]
+                await callback_query.message.edit_text("❌ Download cancelled")
+                return
+            except Exception as e:
+                logging.error(f"Error cancelling Aria2c download: {str(e)}")
+        
+        # Handle download cancellation
         if msg_id in downloads_db:
             file_path = downloads_db[msg_id].get('file_path')
             if file_path and os.path.exists(file_path):
-                os.remove(file_path)
+                try:
+                    os.remove(file_path)
+                    logging.info(f"Download cancelled and file removed: {file_path}")
+                except OSError as e:
+                    logging.error(f"Error removing download file: {str(e)}")
             del downloads_db[msg_id]
+            await callback_query.message.edit_text("❌ Download cancelled")
+            return
         
-        await callback_query.message.edit_text("❌ Operation cancelled")
-        logging.info(f"Operation cancelled by user {callback_query.from_user.id}")
+        # Handle upload cancellation
+        if msg_id in uploads_db:
+            upload_info = uploads_db[msg_id]
+            if upload_info.get('upload_process'):
+                try:
+                    upload_info['upload_process'].terminate()
+                    logging.info(f"Upload cancelled for process: {upload_info['upload_process'].pid}")
+                except Exception as e:
+                    logging.error(f"Error terminating upload process: {str(e)}")
+            del uploads_db[msg_id]
+            await callback_query.message.edit_text("❌ Upload cancelled")
+            return
+        
+        # Handle FFmpeg process termination
+        if msg_id in uploads_db and uploads_db[msg_id].get('ffmpeg_process'):
+            try:
+                ffmpeg_process = uploads_db[msg_id]['ffmpeg_process']
+                if ffmpeg_process and ffmpeg_process.poll() is None:
+                    ffmpeg_process.terminate()
+                    try:
+                        ffmpeg_process.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        ffmpeg_process.kill()
+                    logging.info(f"FFmpeg process terminated: {ffmpeg_process.pid}")
+                
+                # Clean up temporary files
+                temp_files = uploads_db[msg_id].get('temp_files', [])
+                for temp_file in temp_files:
+                    if os.path.exists(temp_file):
+                        try:
+                            os.remove(temp_file)
+                            logging.info(f"Removed temporary file: {temp_file}")
+                        except OSError as e:
+                            logging.error(f"Error removing temporary file: {str(e)}")
+            except Exception as e:
+                logging.error(f"Error terminating FFmpeg process: {str(e)}")
+        
+        await callback_query.message.edit_text("❌ No active operation to cancel")
     except Exception as e:
         logging.error(f"Error in cancel handler: {str(e)}")
         await callback_query.message.edit_text("❌ Error cancelling operation")
